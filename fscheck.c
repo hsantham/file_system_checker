@@ -43,6 +43,19 @@ struct dirent {
   char name[DIRSIZ];
 };
 
+#define MAX_INUM 10
+struct bitmapNetwork_
+{
+    ushort count;
+    ushort inum[MAX_INUM];
+};
+
+struct inodesNetwork_
+{
+    ushort count;
+    ushort parentInum[MAX_INUM];
+};
+
 unsigned int toMachineUint(unsigned int *x)
 {
 	unsigned char *con = (char *)x;
@@ -84,13 +97,23 @@ int main(int argc, char *argv[])
         assert(0 == content[i]);
 
 	// Super block check
-	int fsize; // (in blocks)
 	struct superblock *sb = (struct superblock *) (content + 1 * BSIZE);
-	char *inodesstart, *logstart, *bmapstart, *datastart;
+    sb->ninodes    = toMachineUint(&(sb->ninodes));
+    sb->inodestart = toMachineUint(&(sb->inodestart));
+    sb->bmapstart  = toMachineUint(&(sb->bmapstart));
+
+	int fsize, data_blocks_start, max_block_no; // (in blocks)
 	fsize = toMachineUint(&(sb->size));
-	inodesstart = content + toMachineUint(&(sb->inodestart))*BSIZE;
-	logstart    = content + toMachineUint(&(sb->logstart))*BSIZE;
- 	bmapstart   = content + toMachineUint(&(sb->bmapstart))*BSIZE;
+    max_block_no = fsize/BSIZE - 1;
+    data_blocks_start = sb->bmapstart + 3;
+
+    struct bitmapNetwork_ bitmapNet[max_block_no - data_blocks_start + 1];
+    struct inodesNetwork_ inodesNetwork[toMachineUint(&(sb->ninodes))];
+    
+	char *inodesstart, *logstart, *bmapstart, *datastart;
+	inodesstart = content + sb->inodestart * BSIZE;
+	logstart    = content + sb->logstart   * BSIZE;
+ 	bmapstart   = content + sb->bmapstart  * BSIZE;
 
     unsigned int icount = toMachineUint(&(sb->ninodes));
     struct dinode *inode = (struct dinode *)inodesstart;
@@ -121,6 +144,7 @@ int main(int argc, char *argv[])
         }
         for(int j = 0; j < nblocksForFile; j++)
         {
+            // Find block number
             int blocknumber;
             if(j < NDIRECT)
             {
@@ -131,7 +155,7 @@ int main(int argc, char *argv[])
                 blocknumber = toMachineUint(&(indirectPointers + (NDIRECT - j)));
             }
 
-            if(isValidBlockNumber(blocknumber))
+            if(blocknumber >= data_blocks_start && blocknumber < max_block_no)
             {
                 printf("ERROR: bad address in inode\n");
             }
@@ -140,6 +164,9 @@ int main(int argc, char *argv[])
             {
                 printf("ERROR: address used by inode but marked free in bitmap.\n");
             }
+
+            int bitmapIndex = block_number - data_blocks_start;
+            bitmapNet[bitmapIndex].inum[bitmapNet[bitmapIndex].count++] = inode->inum;
         }
        
 
@@ -154,20 +181,27 @@ int main(int argc, char *argv[])
             for(int child = 0; i < nblocksForFile; i++)
             {
                int blocknumber = inode->addrs[child];
+               // Check this
                if(blocknumber == 0)
                    continue;
 
                struct dirent *entry = (struct dirent *)(content + blocknumber*BSIZE);
                for(int k=0; k < (BSIZE/sizeof(struct dirent)); k++)
                {
+                   // Check this
                    if(entry->inum == 0)
                        continue;
-            
+
+                   ushort index = entry->inum;
+                   inodesNetwork[index].parentInum[inodesNetwork[index].count++] = inode->num;
                    printf("%s\n", entry->name);
                    entry++;
                }
             }
 	    } 
     }
+
+     
+
     return 0;
 }
