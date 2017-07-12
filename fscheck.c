@@ -43,6 +43,8 @@ struct dirent {
   char name[DIRSIZ];
 };
 
+#define getBlockContent(content, blockno) (content + blockno * BSIZE)
+
 #define MAX_INUM 10
 struct bitmapNetwork_
 {
@@ -89,6 +91,43 @@ int isValidInodeType(struct dinode *inode)
     return inode->type >= 0 && inode->type <= T_DEV;
 }
 
+int isValidRootInode(char *content, struct dinode *rootInode)
+{
+    if(rootInode->type != T_DIR)
+        return 0;
+
+    int nblocksForFile = inode->size/BSIZE + 1;
+    for(int child = 0; i < nblocksForFile; i++)
+    {
+       int blocknumber = inode->addrs[child];
+
+       struct dirent *entry = (struct dirent *)
+                                getBlockNumber(content, blocknumber);
+       for(int k=0; k < (BSIZE/sizeof(struct dirent)); k++)
+       {
+           if(entry->inum == 0)
+               continue;
+
+           ushort index = entry->inum;
+           if(strcmp(entry->name, "..") == 0)
+           {
+               if(index != 1)
+                   return 0;
+           }
+
+           if(strcmp(entry->name, ".") == 0)
+           {
+               if(index != 1)
+                   return 0;
+           }
+
+           entry++;
+       }
+    }
+
+    return 1;
+}
+
 int main(int argc, char *argv[]) 
 {
     int fd;
@@ -111,38 +150,41 @@ int main(int argc, char *argv[])
 
 	// Super block check
 	struct superblock *sb = (struct superblock *) (content + 1 * BSIZE);
+    sb->size       = toMachineUint(&(sb->size));
+    sb->nblocks    = toMachineUint(&(sb->nblocks));
     sb->ninodes    = toMachineUint(&(sb->ninodes));
+    sb->nlog       = toMachineUint(&(sb->nlog));
+    sb->logstart   = toMachineUint(&(sb->logstart));
     sb->inodestart = toMachineUint(&(sb->inodestart));
     sb->bmapstart  = toMachineUint(&(sb->bmapstart));
 
-	int fsize, data_blocks_start, max_block_no; // (in blocks)
-	fsize = toMachineUint(&(sb->size));
-    max_block_no = fsize/BSIZE - 1;
-    data_blocks_start = sb->bmapstart + 3;
-
-    struct bitmapNetwork_ bitmapNet[max_block_no - data_blocks_start + 1];
-    struct inodesNetwork_ inodesNetwork[toMachineUint(&(sb->ninodes))];
-    
+	int fsize, data_blocks_start, max_block_no, 
+        data_blocks_count, inodes_count; // (in blocks)
 	char *inodesstart, *logstart, *bmapstart, *datastart;
+    struct bitmapNetwork_ bitmapNet[data_blocks_count];
+    struct inodesNetwork_ inodesNetwork[sb->ninodes];
+    struct dinode *inodePtr;
+
+	fsize             = sb->size;
+    max_block_no      = (fsize / BSIZE) - 1;
+    data_block_number = sb->bmapstart + 3;
+    data_blocks_count = max_block_no - data_block_number + 1;
+    
 	inodesstart = content + sb->inodestart * BSIZE;
 	logstart    = content + sb->logstart   * BSIZE;
  	bmapstart   = content + sb->bmapstart  * BSIZE;
+    inodePtr    = (struct dinode *)inodesstart;
 
-    unsigned int icount = toMachineUint(&(sb->ninodes));
-    struct dinode *inode = (struct dinode *)inodesstart;
-
-
-    if(!isValidRootInode(inodesstart + 1))
+    if(!isValidRootInode(inodesPtr + 1))
     {
         printf("ERROR MESSAGE: root directory does not exist.\n");
     }
 
-
-	for(int i=0; i < icount; i++, inode++) {
-
+	for(int i=0; i < icount; i++, inode++) 
+    {
         inode = getInodeNumberContent(content, i);
 
-        if(!isValidInodeType(inode->type)) 
+        if(inode->type >= 0 && inode->type <= T_DEV) 
         {
             printf("ERROR: bad inode\n");
             continue;
@@ -155,6 +197,7 @@ int main(int argc, char *argv[])
         {
             indirectPointers = content + indirectBlockNumber * BSIZE;
         }
+
         for(int j = 0; j < nblocksForFile; j++)
         {
             // Find block number
@@ -165,7 +208,7 @@ int main(int argc, char *argv[])
             }
             else
             {
-                blocknumber = toMachineUint(&(indirectPointers + (NDIRECT - j)));
+                blocknumber = indirectPointers + (NDIRECT - j);
             }
 
             if(blocknumber >= data_blocks_start && blocknumber < max_block_no)
