@@ -76,6 +76,19 @@ unsigned short toMachineUshort(unsigned short *x)
 	return mach;
 }
 
+void getBitmapForBlockNumber(char *bitmapBlock, int blocknumber)
+{
+    int bitmapBlockIndex = blocknumber / 8;
+    char byteHoldingBitmap = *(bitmapBlock + blocknumber);
+    int shift = (7 - (blocknumber % 8));
+    return (byteHoldingBitmap >> shift) & 1;
+}
+
+int isValidInodeType(struct dinode *inode)
+{
+    return inode->type >= 0 && inode->type <= T_DEV;
+}
+
 int main(int argc, char *argv[]) 
 {
     int fd;
