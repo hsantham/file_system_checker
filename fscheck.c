@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <sys/types.h>
@@ -14,6 +15,9 @@
 #define T_DIR  1   // Directory
 #define T_FILE 2   // File
 #define T_DEV  3   // Device
+
+#define IPB           (BSIZE / sizeof(struct dinode))
+#define IBLOCK(i, sb)     ((i) / IPB + sb->inodestart)
 
 typedef unsigned int uint;
 
@@ -54,6 +58,10 @@ struct bitmapNetwork_
 
 struct inodesNetwork_
 {
+    int isDir;
+    int nlink;
+    int inuse;
+    int dotdot_inum;
     ushort count;
     ushort parentInum[MAX_INUM];
 };
@@ -78,17 +86,9 @@ unsigned short toMachineUshort(unsigned short *x)
 	return mach;
 }
 
-void getBitmapForBlockNumber(char *bitmapBlock, int blocknumber)
-{
-    int bitmapBlockIndex = blocknumber / 8;
-    char byteHoldingBitmap = *(bitmapBlock + blocknumber);
-    int shift = (7 - (blocknumber % 8));
-    return (byteHoldingBitmap >> shift) & 1;
-}
-
 int isValidInodeType(struct dinode *inode)
 {
-    return inode->type >= 0 && inode->type <= T_DEV;
+    return inode != NULL && inode->type >= 0 && inode->type <= T_DEV;
 }
 
 int isValidRootInode(char *content, struct dinode *rootInode)
@@ -96,13 +96,13 @@ int isValidRootInode(char *content, struct dinode *rootInode)
     if(rootInode->type != T_DIR)
         return 0;
 
-    int nblocksForFile = inode->size/BSIZE + 1;
-    for(int child = 0; i < nblocksForFile; i++)
+    int nblocksForFile = rootInode->size/BSIZE + 1;
+    for(int child = 0; child < nblocksForFile; child++)
     {
-       int blocknumber = inode->addrs[child];
+       int blocknumber = rootInode->addrs[child];
 
        struct dirent *entry = (struct dirent *)
-                                getBlockNumber(content, blocknumber);
+                                getBlockContent(content, blocknumber);
        for(int k=0; k < (BSIZE/sizeof(struct dirent)); k++)
        {
            if(entry->inum == 0)
@@ -128,6 +128,27 @@ int isValidRootInode(char *content, struct dinode *rootInode)
     return 1;
 }
 
+#define getBitmapBlock(content, sb) (content + sb->bmapstart)
+
+int getBitmapValueForBlock(char*               content, 
+                           struct superblock*  sb, 
+                           int                 blocknumber)
+{
+    char *bitmapBlock = content + sb->bmapstart;
+    int byte_offset   = blocknumber / 8;
+    int byte_value    = *(bitmapBlock + byte_offset);
+    int bit_shift_len = 7 - (blocknumber % 8);
+    return (byte_value >> bit_shift_len) & 1;
+}
+
+struct dinode *getInodeContent(char*              content,
+                               struct superblock* sb,
+                               int                inum)
+{
+    int bn = IBLOCK(inum, sb);
+    return (struct dinode *)getBlockContent(content, bn);
+}
+
 int main(int argc, char *argv[]) 
 {
     int fd;
@@ -149,7 +170,9 @@ int main(int argc, char *argv[])
         assert(0 == content[i]);
 
 	// Super block check
-	struct superblock *sb = (struct superblock *) (content + 1 * BSIZE);
+	struct superblock *sb;
+    struct superblock sbb = *(struct superblock *) (content + 1 * BSIZE);
+    sb = &sbb;
     sb->size       = toMachineUint(&(sb->size));
     sb->nblocks    = toMachineUint(&(sb->nblocks));
     sb->ninodes    = toMachineUint(&(sb->ninodes));
@@ -158,44 +181,54 @@ int main(int argc, char *argv[])
     sb->inodestart = toMachineUint(&(sb->inodestart));
     sb->bmapstart  = toMachineUint(&(sb->bmapstart));
 
-	int fsize, data_blocks_start, max_block_no, 
+	int fsize, first_data_blk_no, max_block_no, 
         data_blocks_count, inodes_count; // (in blocks)
 	char *inodesstart, *logstart, *bmapstart, *datastart;
-    struct bitmapNetwork_ bitmapNet[data_blocks_count];
-    struct inodesNetwork_ inodesNetwork[sb->ninodes];
-    struct dinode *inodePtr;
+#define MAX_DATA_BLOCKS_COUNT 1000
+#define MAX_INODES_COUNT      10000
+    struct bitmapNetwork_ bitmapNet[MAX_DATA_BLOCKS_COUNT] = {};
+    struct inodesNetwork_ inodesNetwork[MAX_INODES_COUNT] = {};
+    struct dinode *inodePtr, *inode;
 
 	fsize             = sb->size;
     max_block_no      = (fsize / BSIZE) - 1;
-    data_block_number = sb->bmapstart + 3;
-    data_blocks_count = max_block_no - data_block_number + 1;
+    first_data_blk_no = sb->bmapstart + 3;
+    data_blocks_count = max_block_no - first_data_blk_no + 1;
     
 	inodesstart = content + sb->inodestart * BSIZE;
 	logstart    = content + sb->logstart   * BSIZE;
  	bmapstart   = content + sb->bmapstart  * BSIZE;
     inodePtr    = (struct dinode *)inodesstart;
 
-    if(!isValidRootInode(inodesPtr + 1))
-    {
+    if(!isValidRootInode(content, inodePtr + 1))
         printf("ERROR MESSAGE: root directory does not exist.\n");
-    }
+    else
+        printf("Valid root node\n");
 
-	for(int i=0; i < icount; i++, inode++) 
+	for(int i=0; i < sb->ninodes; i++) 
     {
-        inode = getInodeNumberContent(content, i);
+        inode = getInodeContent(content, sb, i);
 
-        if(inode->type >= 0 && inode->type <= T_DEV) 
+        if(!isValidInodeType(inode)) 
         {
             printf("ERROR: bad inode\n");
             continue;
         }
 
+        if(inode->type == 0)
+            continue;
+
+        inodesNetwork[i].inuse = 1; 
+        inodesNetwork[i].nlink = inode->nlink; 
+        inodesNetwork[i].isDir = (inode->type == T_DIR);
+
         int nblocksForFile = inode->size/BSIZE + 1;
+        nblocksForFile = (nblocksForFile > 13) ? 13 : nblocksForFile;
         int indirectBlockNumber = inode->addrs[NDIRECT];
         unsigned int *indirectPointers = NULL;
         if(nblocksForFile > NDIRECT)
         {
-            indirectPointers = content + indirectBlockNumber * BSIZE;
+            indirectPointers = (unsigned int *) (content + indirectBlockNumber * BSIZE);
         }
 
         for(int j = 0; j < nblocksForFile; j++)
@@ -208,40 +241,45 @@ int main(int argc, char *argv[])
             }
             else
             {
-                blocknumber = indirectPointers + (NDIRECT - j);
+                blocknumber = toMachineUint(indirectPointers + (NDIRECT - j));
             }
 
-            if(blocknumber >= data_blocks_start && blocknumber < max_block_no)
+            if((blocknumber >= first_data_blk_no) && 
+               (blocknumber <  (first_data_blk_no + data_blocks_count)))
             {
                 printf("ERROR: bad address in inode\n");
             }
 
-            if(!getBitmapValueForBlock(blocknumber))
+            if(!getBitmapValueForBlock(content, sb, blocknumber))
             {
                 printf("ERROR: address used by inode but marked free in bitmap.\n");
             }
 
-            int bitmapIndex = block_number - data_blocks_start;
-            bitmapNet[bitmapIndex].inum[bitmapNet[bitmapIndex].count++] = inode->inum;
+            int bitmapIndex = blocknumber - first_data_blk_no;
+            bitmapNet[bitmapIndex].inum[bitmapNet[bitmapIndex].count++] = i;
         }
        
 
         if(inode->type == T_DIR)
         {
-            if(!isValidDirEntry(inode))
-            {
-                printf("ERROR: directory not properly formatted\n");
-            }
-
             // Get each child's 
-            for(int child = 0; i < nblocksForFile; i++)
+            for(int child = 0; child < nblocksForFile; child++)
             {
-               int blocknumber = inode->addrs[child];
-               // Check this
-               if(blocknumber == 0)
-                   continue;
+               // Find block number
+               int blocknumber;
+               if(child < NDIRECT)
+               {
+                   blocknumber = inode->addrs[child];
+               }
+               else
+               {
+                   blocknumber = toMachineUint(indirectPointers + (NDIRECT - child));
+               }
 
-               struct dirent *entry = (struct dirent *)(content + blocknumber*BSIZE);
+
+               int hasDot = 0, hasDotdot = 0;
+               struct dirent *entry = 
+                   (struct dirent *)getBlockContent(content, blocknumber);
                for(int k=0; k < (BSIZE/sizeof(struct dirent)); k++)
                {
                    // Check this
@@ -249,15 +287,86 @@ int main(int argc, char *argv[])
                        continue;
 
                    ushort index = entry->inum;
-                   inodesNetwork[index].parentInum[inodesNetwork[index].count++] = inode->num;
+                   if(strcmp(entry->name, "..") == 0)
+                   {
+                       hasDotdot = 1;
+                       inodesNetwork[i].dotdot_inum = index;
+                   }
+                   else if(strcmp(entry->name, ".") == 0)
+                   {
+                       hasDot = 1;
+                   }
+                   else 
+                   {
+                       inodesNetwork[index].parentInum[inodesNetwork[index].count++] = i;
+                   }
+
                    printf("%s\n", entry->name);
                    entry++;
                }
+
+               if(!hasDot || !hasDotdot)
+                   printf("ERROR: directory not properly formatted");
             }
 	    } 
     }
 
-     
+    char *bitmapBlock = getBitmapBlock(content, sb);
+    for(int i = 0; i < data_blocks_count; i++)
+    {
+        if(bitmapNet[1].count > 1)
+        {
+            printf("ERROR: address used more than once\n");
+        }
+
+        int byte_offset = i / 8;
+        int shift_len   = 7 - (i % 8);
+        int bitmapValue = (*(bitmapBlock + byte_offset) >> shift_len) & 1;
+        if(bitmapValue != (bitmapNet[1].count > 1))
+        {
+            printf("ERROR: bitmap marks block in use but it is not in use");
+        }
+    }
+
+    for(int i = 0; i < sb->ninodes; i++)
+    {
+        if(inodesNetwork[i].inuse && (inodesNetwork[i].count == 0))
+        {
+            printf("ERROR: inode marked use but not found in a directory.\n");
+        }
+
+        if(!inodesNetwork[i].inuse && (inodesNetwork[i].count >= 1))
+        {
+            printf("ERROR: inode referred to in directory but marked free.\n");
+        }
+
+        if(inodesNetwork[i].nlink != inodesNetwork[i].count)
+        {
+            printf("ERROR: bad reference count for file.");
+        }
+
+        if(inodesNetwork[i].isDir && (inodesNetwork[i].count > 1))
+        {
+            printf("ERROR: directory appears more than once in file system.");
+        }
+
+        if(!inodesNetwork[i].isDir)
+            continue;
+
+        int parent_inode_no = inodesNetwork[i].dotdot_inum;
+        int mutual_ref = 0;
+        for(int j = 0; j < inodesNetwork[i].count; j++)
+        {
+            if(inodesNetwork[i].parentInum[j] == parent_inode_no)
+            {
+                mutual_ref = 1;
+            }
+        }
+        if(mutual_ref == 0)
+        {
+            printf("ERROR: parent directory mismatch\n");
+        }
+    }
 
     return 0;
 }
